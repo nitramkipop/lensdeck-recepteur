@@ -11,7 +11,7 @@
     font-family:system-ui,-apple-system,Roboto,sans-serif}
   #wrap{padding:22px 26px}
   h1{margin:0 0 10px;font-size:26px;color:#4fd1c5}
-  .row{display:flex;justify-content:space-between;font-size:20px;line-height:30px}
+  .row{display:flex;justify-content:space-between;font-size:19px;line-height:28px}
   .ok{color:#7CFC9A}.ko{color:#FF7B7B}.wait{color:#F2C94C}
   #code{margin-top:14px;font-size:22px;line-height:30px;color:#F2C94C;word-break:break-all}
   #status{font-size:18px;color:#B0B4BC;margin-top:6px}
@@ -34,7 +34,7 @@ function line(id, label){ const d=document.createElement('div'); d.className='ro
 function set(id, txt, ok){ const e=document.getElementById('v_'+id); e.textContent=txt; e.className = ok?'ok':'ko'; }
 [['rtc','Vidéo directe (WebRTC)'],['ice','Réseau local'],['ws','WebSocket'],['mp4','Vidéo MP4/H.264'],
  ['mse','Flux vidéo (MSE)'],['wc','Décodeur (WebCodecs)'],['dl','Débit réseau'],['fps','Images/s affichables'],
- ['lan','Accès réseau local']].forEach(a=>line(a[0],a[1]));
+ ['lan','Accès réseau local'],['drm','Vidéo protégée (Widevine)']].forEach(a=>line(a[0],a[1]));
 
 function withTimeout(p, ms){ return Promise.race([p, new Promise(r=>setTimeout(()=>r('timeout'),ms))]); }
 
@@ -105,13 +105,23 @@ async function testLan(){
   set('lan', r==='ok'?'oui':(r==='timeout'?'incertain':'bloqué'), r==='ok');
 }
 
+async function testDrm(){
+  try{
+    if(!navigator.requestMediaKeySystemAccess){ R.drm=0; set('drm','non',false); return; }
+    const cfg=[{initDataTypes:['cenc'],videoCapabilities:[{contentType:'video/mp4; codecs="avc1.42E01E"'}]}];
+    const acc=await withTimeout(navigator.requestMediaKeySystemAccess('com.widevine.alpha',cfg).then(()=> 'ok').catch(()=> 'non'),5000);
+    R.drm = acc==='ok'?1:0; set('drm', acc==='ok'?'oui':'non', acc==='ok');
+  }catch(e){ R.drm=0; set('drm','non',false); }
+}
+
 (async()=>{
   testCodecs();
+  await testDrm();
   await Promise.all([testRTC(), testWS(), testLan()]);
   await testDownload();
   await testFps();
   const net = navigator.connection ? (navigator.connection.effectiveType||'')+'/'+(navigator.connection.type||'') : '-';
-  const code = 'R'+R.rtc+' I'+R.ice+' W'+R.ws+' M'+R.mp4+R.mse+R.wc+' D'+R.dl+' F'+R.fps+' L'+R.lan+' N'+net;
+  const code = 'R'+R.rtc+' I'+R.ice+' W'+R.ws+' M'+R.mp4+R.mse+R.wc+' D'+R.dl+' F'+R.fps+' L'+R.lan+' P'+R.drm+' N'+net;
   document.getElementById('status').textContent='Terminé. Dicte-moi la ligne jaune :';
   document.getElementById('code').textContent=code;
   try{ localStorage.setItem('lensdeck_test', code+' | '+navigator.userAgent); }catch(e){}
