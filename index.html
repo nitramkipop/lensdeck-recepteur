@@ -44,7 +44,6 @@ const params = new URLSearchParams(location.search);
 let KEY = params.get('k');
 try { if (KEY) localStorage.setItem('ld_k', KEY); else KEY = localStorage.getItem('ld_k'); } catch (e) {}
 
-const SERVER = 'wss://0.peerjs.com/peerjs';
 const v = document.getElementById('v');
 const statusEl = document.getElementById('status');
 const cursorEl = document.getElementById('cursor');
@@ -163,59 +162,69 @@ document.addEventListener('keydown', (e) => {
 });
 function flash() { cursorEl.style.borderColor = '#fff'; setTimeout(() => cursorEl.style.borderColor = '#FFD600', 180); }
 
-// ---------------------------------------------------------------- Lien avec le téléphone
-let ws, pc, ctl, hb, helloTimer, live = false, pending = [], remoteSet = false, infoOn = false;
-function sendSig(type, payload) {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type, payload, dst: 'ld-' + KEY + '-p' }));
+// ---------------------------------------------------------------- Lien avec le téléphone (ntfy.sh)
+let ws, pc, ctl, helloTimer, live = false, infoOn = false, lastHello = 0;
+const MY_TOPIC = () => 'lensdeck-' + KEY + '-g';
+const PHONE_TOPIC = () => 'lensdeck-' + KEY + '-p';
+const parts = {};
+function publish(obj) {
+  return fetch('https://ntfy.sh/' + PHONE_TOPIC(), { method: 'POST', body: JSON.stringify(obj) }).catch(() => {});
 }
 function send(obj) { if (ctl && ctl.readyState === 'open') ctl.send(JSON.stringify(obj)); else toast('Téléphone non connecté'); }
-function sayHello() { sendSig('OFFER', { t: 'hello' }); }
+function sayHello() { const now = Date.now(); if (now - lastHello < 6000) return; lastHello = now; publish({ t: 'hello' }); }
+function publishSdp(kind, sdp) {
+  const id = Math.random().toString(16).slice(2, 12);
+  const n = Math.ceil(sdp.length / 2800);
+  for (let i = 0; i < n; i++) publish({ t: 'part', id, i, n, k: kind, d: sdp.slice(i * 2800, (i + 1) * 2800) });
+}
 
 function connect() {
-  setStatus(live ? '' : 'Connexion…');
-  ws = new WebSocket(SERVER + '?key=peerjs&id=ld-' + KEY + '-g&token=' + rnd() + '&version=1.5.4');
-  ws.onmessage = (e) => { try { onSignal(JSON.parse(e.data)); } catch (err) {} };
-  ws.onclose = () => { clearInterval(hb); clearInterval(helloTimer); setTimeout(connect, 3000); };
-}
-function onSignal(m) {
-  if (m.type === 'OPEN') {
+  if (!live) setStatus('Connexion…');
+  ws = new WebSocket('wss://ntfy.sh/' + MY_TOPIC() + '/ws');
+  ws.onopen = () => {
     if (!live) setStatus('En attente du téléphone…', 'Sur ton S25 : LensDeck → « Caster mon écran sur mes lunettes »');
-    clearInterval(hb); hb = setInterval(() => ws.send('{"type":"HEARTBEAT"}'), 5000);
-    sayHello(); clearInterval(helloTimer); helloTimer = setInterval(() => { if (!live) sayHello(); }, 4000);
-  } else if (m.type === 'ID-TAKEN') {
-    setStatus('LensDeck est déjà ouvert ailleurs', 'Nouvel essai…'); ws.close();
-  } else if (m.type === 'OFFER' || m.type === 'ANSWER' || m.type === 'CANDIDATE') {
-    const p = m.payload || {};
-    if (p.t === 'ping') sayHello();
-    else if (p.t === 'offer') handleOffer(p.sdp);
-    else if (p.t === 'ice') {
-      const c = { candidate: p.c, sdpMid: p.mid, sdpMLineIndex: p.i };
-      if (pc && remoteSet) pc.addIceCandidate(c).catch(() => {}); else pending.push(c);
-    }
+    lastHello = 0; sayHello();
+    clearInterval(helloTimer); helloTimer = setInterval(() => { if (!live) sayHello(); }, 10000);
+  };
+  ws.onmessage = (e) => { try { const ev = JSON.parse(e.data); if (ev.event === 'message') onSignal(JSON.parse(ev.message)); } catch (err) {} };
+  ws.onclose = () => { clearInterval(helloTimer); setTimeout(connect, 3000); };
+}
+function onSignal(p) {
+  if (p.t === 'ping') { lastHello = 0; sayHello(); }
+  else if (p.t === 'part') {
+    const arr = parts[p.id] || (parts[p.id] = new Array(p.n).fill(null));
+    arr[p.i] = p.d;
+    if (arr.every((x) => x !== null)) { delete parts[p.id]; if (p.k === 'offer') handleOffer(arr.join('')); }
   }
+}
+function waitGathering(peer, ms) {
+  return new Promise((res) => {
+    if (peer.iceGatheringState === 'complete') return res();
+    const t = setTimeout(res, ms);
+    peer.addEventListener('icegatheringstatechange', () => { if (peer.iceGatheringState === 'complete') { clearTimeout(t); res(); } });
+  });
 }
 async function handleOffer(sdp) {
   if (pc) { try { pc.close(); } catch (e) {} }
   const peer = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-  pc = peer; pending = []; remoteSet = false;
+  pc = peer;
   setStatus('Connexion au téléphone…');
   peer.ontrack = (e) => { v.srcObject = e.streams[0] || new MediaStream([e.track]); v.play().catch(() => {}); };
   peer.ondatachannel = (e) => { ctl = e.channel; };
-  peer.onicecandidate = (e) => { if (e.candidate) sendSig('CANDIDATE',
-      { t: 'ice', c: e.candidate.candidate, mid: e.candidate.sdpMid, i: e.candidate.sdpMLineIndex }); };
   peer.onconnectionstatechange = () => {
     if (peer !== pc) return;
     const s = peer.connectionState;
     if (s === 'connected') { live = true; setStatus(''); toast('Pincer = menu · ←/→ = zoom'); }
-    else if (s === 'failed' || s === 'closed') { live = false; setStatus('Lien perdu', 'Reconnexion…'); sayHello(); }
+    else if (s === 'failed' || s === 'closed') { live = false; setStatus('Lien perdu', 'Reconnexion…'); lastHello = 0; sayHello(); }
     else if (s === 'disconnected') { setStatus('Lien instable…'); }
   };
   try {
     await peer.setRemoteDescription({ type: 'offer', sdp });
-    remoteSet = true; pending.forEach((c) => peer.addIceCandidate(c).catch(() => {})); pending = [];
     const answer = await peer.createAnswer();
     await peer.setLocalDescription(answer);
-    sendSig('ANSWER', { t: 'answer', sdp: peer.localDescription.sdp });
+    await waitGathering(peer, 3000);
+    if (peer !== pc) return;
+    publishSdp('answer', peer.localDescription.sdp);
   } catch (err) { setStatus('Erreur de connexion', String(err && err.message || err)); }
 }
 
