@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=600, height=600, initial-scale=1">
+<meta name="mrbd-web-app-capable" content="yes">
+<title>LensDeck Test réseau</title>
+<link rel="icon" type="image/png" href="icon.png">
+<style>
+  html,body{margin:0;width:600px;height:600px;overflow:hidden;background:#000;color:#fff;
+    font-family:system-ui,-apple-system,Roboto,sans-serif}
+  #wrap{padding:22px 26px}
+  h1{margin:0 0 10px;font-size:26px;color:#4fd1c5}
+  .row{display:flex;justify-content:space-between;font-size:20px;line-height:30px}
+  .ok{color:#7CFC9A}.ko{color:#FF7B7B}.wait{color:#F2C94C}
+  #code{margin-top:14px;font-size:22px;line-height:30px;color:#F2C94C;word-break:break-all}
+  #status{font-size:18px;color:#B0B4BC;margin-top:6px}
+  canvas{display:none}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>LensDeck · test des lunettes</h1>
+  <div id="rows"></div>
+  <div id="status">Test en cours… (environ 20 s)</div>
+  <div id="code"></div>
+</div>
+<canvas id="cv" width="600" height="600"></canvas>
+<script>
+const rows = document.getElementById('rows');
+const R = {};
+function line(id, label){ const d=document.createElement('div'); d.className='row';
+  d.innerHTML='<span>'+label+'</span><span id="v_'+id+'" class="wait">…</span>'; rows.appendChild(d); }
+function set(id, txt, ok){ const e=document.getElementById('v_'+id); e.textContent=txt; e.className = ok?'ok':'ko'; }
+[['rtc','Vidéo directe (WebRTC)'],['ice','Réseau local'],['ws','WebSocket'],['mp4','Vidéo MP4/H.264'],
+ ['mse','Flux vidéo (MSE)'],['wc','Décodeur (WebCodecs)'],['dl','Débit réseau'],['fps','Images/s affichables'],
+ ['lan','Accès réseau local']].forEach(a=>line(a[0],a[1]));
+
+function withTimeout(p, ms){ return Promise.race([p, new Promise(r=>setTimeout(()=>r('timeout'),ms))]); }
+
+async function testRTC(){
+  if(!window.RTCPeerConnection){ set('rtc','non',false); set('ice','—',false); R.rtc=0; R.ice='0'; return; }
+  set('rtc','oui',true); R.rtc=1;
+  try{
+    const pc = new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+    pc.createDataChannel('t');
+    const types = {host:0, srflx:0, relay:0}; let lanLike=0;
+    pc.onicecandidate = e => { if(e.candidate && e.candidate.candidate){
+      const c=e.candidate.candidate; const m=c.match(/ typ (\w+)/); if(m) types[m[1]]=(types[m[1]]||0)+1;
+      if(/ (192\.168|10\.|172\.(1[6-9]|2\d|3[01]))/.test(c) || /\.local /.test(c)) lanLike++; } };
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise(r=>{ const t=setTimeout(r,6000); pc.onicegatheringstatechange=()=>{ if(pc.iceGatheringState==='complete'){clearTimeout(t);r();} }; });
+    R.ice='h'+types.host+'s'+types.srflx+'l'+lanLike;
+    set('ice', 'local '+types.host+' · internet '+types.srflx, types.host>0);
+    pc.close();
+  }catch(e){ R.ice='err'; set('ice','erreur',false); }
+}
+
+async function testWS(){
+  if(!window.WebSocket){ set('ws','non',false); R.ws=0; return; }
+  const r = await withTimeout(new Promise(res=>{ try{
+    const w=new WebSocket('wss://echo.websocket.org'); w.onopen=()=>{w.send('x')}; w.onmessage=()=>{res('ok');w.close()}; w.onerror=()=>res('err');
+  }catch(e){res('err')} }), 6000);
+  R.ws = r==='ok'?1:(r==='timeout'?'t':0); set('ws', r==='ok'?'oui':(r==='timeout'?'pas de réponse':'bloqué'), r==='ok');
+}
+
+function testCodecs(){
+  const v=document.createElement('video');
+  const h264 = v.canPlayType('video/mp4; codecs="avc1.42E01E"');
+  R.mp4 = h264? (h264==='probably'?2:1):0; set('mp4', h264||'non', !!h264);
+  const mse = window.MediaSource || window.ManagedMediaSource;
+  const mseOk = mse && mse.isTypeSupported && mse.isTypeSupported('video/mp4; codecs="avc1.42E01E"');
+  R.mse = mseOk?1:0; set('mse', mseOk?'oui':'non', !!mseOk);
+  const wc = 'VideoDecoder' in window; R.wc = wc?1:0; set('wc', wc?'oui':'non', wc);
+}
+
+async function testDownload(){
+  try{
+    const t0=performance.now();
+    const res=await withTimeout(fetch('speed.bin?n='+Date.now(),{cache:'no-store'}).then(r=>r.arrayBuffer()), 15000);
+    if(res==='timeout'){ R.dl='t'; set('dl','trop lent',false); return; }
+    const s=(performance.now()-t0)/1000; const mbps = (res.byteLength*8/1e6)/s;
+    R.dl = mbps.toFixed(1); set('dl', mbps.toFixed(1)+' Mb/s', mbps>3);
+  }catch(e){ R.dl='err'; set('dl','erreur',false); }
+}
+
+async function testFps(){
+  const cv=document.getElementById('cv'); const g=cv.getContext('2d');
+  // Fabrique une image JPEG de 600x600 puis mesure combien on peut en décoder/afficher par seconde.
+  const tmp=document.createElement('canvas'); tmp.width=600; tmp.height=600; const tg=tmp.getContext('2d');
+  for(let i=0;i<60;i++){ tg.fillStyle='hsl('+(i*6)+',70%,50%)'; tg.fillRect((i*37)%600,(i*53)%600,120,90); }
+  const blob = await new Promise(r=>tmp.toBlob(r,'image/jpeg',0.7));
+  let n=0; const t0=performance.now();
+  while(performance.now()-t0<2000){ const bmp=await createImageBitmap(blob); g.drawImage(bmp,0,0); bmp.close&&bmp.close(); n++;
+    await new Promise(r=>requestAnimationFrame(()=>r())); }
+  const fps=n/((performance.now()-t0)/1000); R.fps=Math.round(fps); set('fps', Math.round(fps)+' img/s', fps>=15);
+}
+
+async function testLan(){
+  // Une page HTTPS peut-elle joindre une adresse du réseau local (ex. ton téléphone) ?
+  const t0=performance.now();
+  const r = await withTimeout(fetch('http://192.168.1.1/',{mode:'no-cors'}).then(()=> 'ok').catch(e=>'err:'+e.name), 4000);
+  const ms=Math.round(performance.now()-t0);
+  R.lan = r==='ok'?1:(r==='timeout'?'t':0)+'_'+ms;
+  set('lan', r==='ok'?'oui':(r==='timeout'?'incertain':'bloqué'), r==='ok');
+}
+
+(async()=>{
+  testCodecs();
+  await Promise.all([testRTC(), testWS(), testLan()]);
+  await testDownload();
+  await testFps();
+  const net = navigator.connection ? (navigator.connection.effectiveType||'')+'/'+(navigator.connection.type||'') : '-';
+  const code = 'R'+R.rtc+' I'+R.ice+' W'+R.ws+' M'+R.mp4+R.mse+R.wc+' D'+R.dl+' F'+R.fps+' L'+R.lan+' N'+net;
+  document.getElementById('status').textContent='Terminé. Dicte-moi la ligne jaune :';
+  document.getElementById('code').textContent=code;
+  try{ localStorage.setItem('lensdeck_test', code+' | '+navigator.userAgent); }catch(e){}
+})();
+</script>
+</body>
+</html>
